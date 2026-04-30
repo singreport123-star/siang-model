@@ -16,40 +16,40 @@ jobs:
       contents: write
 
     steps:
+      # 1️⃣ 下載 repo
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GH_TOKEN }}
 
+      # 2️⃣ Python 環境
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
+      # 3️⃣ 安裝套件
       - name: Install dependencies
         run: |
           pip install pandas requests lxml html5lib beautifulsoup4 pyarrow yfinance
 
-      - name: Run model
+      # 4️⃣ 執行資料抓取 + 掃描
+      - name: Run model & scanner
         run: |
           python main.py
           sleep 15
           python scanner.py
 
-      - name: Commit & Push (關鍵修正)
+      # 5️⃣ Commit & Push（✅ 已修正，不會再刪資料）
+      - name: Commit & Push
         run: |
           git config user.email "action@github.com"
           git config user.name "Siang-Model-Bot"
 
-          # 🔴 強制同步遠端（避免 rebase 問題）
-          git fetch origin
-          git reset --hard origin/main
-
-          # 🔴 加入所有變更（包含 parquet）
+          # ❗不要 reset（之前 bug 在這）
           git add -A
 
-          # 🔴 確認是否有變更
           if [ -n "$(git status --porcelain)" ]; then
             git commit -m "🚀 Data Sync $(date +'%Y-%m-%d %H:%M')"
             git push origin main
