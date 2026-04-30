@@ -1,63 +1,76 @@
-import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import json, os, yfinance as yf
-from datetime import datetime, timedelta
-
-st.set_page_config(page_title="祥哥戰情室", layout="wide")
+import glob
+import os
+import json
+from multiprocessing import Pool
 
 
-@st.cache_data
-def load_map():
-    if os.path.exists("stock_map.json"):
-        return json.load(open("stock_map.json", "r", encoding="utf-8"))
-    return {}
+def calculate_metrics(df):
+    if df.empty:
+        return None
 
-
-@st.cache_data
-def load_data(path):
-    df = pd.read_parquet(path)
     df["資料日期"] = pd.to_datetime(df["資料日期"], errors="coerce")
-    return df
-
-
-stock_map = load_map()
-
-st.sidebar.header("設定")
-stock_options = [f"{k} {v}" for k, v in stock_map.items()]
-selected = st.sidebar.selectbox("股票", stock_options)
-sid = selected.split(" ")[0]
-
-st.title(f"📊 {sid} 戰情室")
-
-path = f"data/chip/{sid[:2]}/{sid}.parquet"
-
-if os.path.exists(path):
-
-    df = load_data(path)
-
-    # 防 NaN
     df = df.dropna(subset=["資料日期"])
+    df = df.sort_values("資料日期")
 
-    # price
-    ticker = f"{sid}.TW"
-    price = yf.download(ticker, period="6mo", progress=False)
+    dates = df["資料日期"].unique()
+    if len(dates) < 2:
+        return None
 
-    if not price.empty:
-        if isinstance(price.columns, pd.MultiIndex):
-            price.columns = price.columns.get_level_values(0)
+    l_df = df[df["資料日期"] == dates[-1]]
+    p_df = df[df["資料日期"] == dates[-2]]
 
-        price = price.dropna(subset=["Close"])
-        price.index = pd.to_datetime(price.index)
+    l_1000 = l_df.loc[l_df["持股分級"] == 15, "權重"].sum()
+    p_1000 = p_df.loc[p_df["持股分級"] == 15, "權重"].sum()
 
-    st.write("籌碼資料")
-    st.dataframe(df.tail(20))
+    l_h = l_df["人數"].sum()
+    p_h = p_df["人數"].sum()
 
-    if not price.empty:
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=price.index, y=price["Close"], name="Price"))
-        st.plotly_chart(fig)
+    human_change = ((l_h - p_h) / p_h) * 100 if p_h > 0 else 0
 
-else:
-    st.warning("無資料")
+    l_conc = l_df.loc[l_df["持股分級"] >= 11, "權重"].sum()
+
+    return {
+        "股號": None,
+        "大戶%": round(l_1000, 2),
+        "大戶週增減": round(l_1000 - p_1000, 2),
+        "人數變動": round(human_change, 2),
+        "集中度(大+中)": round(l_conc, 2)
+    }
+
+
+def process_file(args):
+    f, stock_map = args
+    sid = os.path.basename(f).replace(".parquet", "")
+
+    try:
+        df = pd.read_parquet(f)
+        m = calculate_metrics(df)
+        if m:
+            m["股號"] = sid
+            m["名稱"] = stock_map.get(sid, "未知")
+            return m
+    except:
+        return None
+
+
+def run_scan():
+    print("🚀 scanning...")
+
+    with open("stock_map.json", "r", encoding="utf-8") as f:
+        stock_map = json.load(f)
+
+    files = glob.glob("data/chip/**/*.parquet", recursive=True)
+
+    with Pool(processes=2) as pool:
+        results = pool.map(process_file, [(f, stock_map) for f in files])
+
+    results = [r for r in results if r]
+
+    if results:
+        pd.DataFrame(results).to_parquet("latest_snapshot.parquet", index=False)
+        print(f"✅ {len(results)} stocks updated")
+
+
+if __name__ == "__main__":
+    run_scan()
