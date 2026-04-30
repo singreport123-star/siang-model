@@ -4,16 +4,15 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import json
 import os
+import yfinance as yf
+from datetime import datetime, timedelta
 
 # =========================
-# 基本設定
+# 1. 基礎設定與快取
 # =========================
-st.set_page_config(page_title="祥哥籌碼戰情室", layout="wide")
-st.title("🚀 祥哥籌碼戰情室 - 15x3 矩陣掃描")
+st.set_page_config(page_title="祥哥籌碼價量戰情室", layout="wide")
+st.title("🚀 祥哥籌碼價量戰情室 (15級全功能版)")
 
-# =========================
-# 快取資料 - 優化網頁速度
-# =========================
 @st.cache_data
 def load_stock_map():
     if os.path.exists("stock_map.json"):
@@ -22,96 +21,180 @@ def load_stock_map():
     return {}
 
 @st.cache_data
-def load_snapshot():
-    return pd.read_parquet("latest_snapshot.parquet")
-
-@st.cache_data
 def load_stock_data(path):
     df = pd.read_parquet(path)
-    # 確保日期格式正確
-    df["資料日期"] = pd.to_datetime(df["資料日期"], errors="coerce")
+    # 強制修正日期：防止 1970 Unix Timestamp 錯誤
+    df["資料日期"] = pd.to_datetime(df["資料日期"].astype(str), format='%Y%m%d', errors='coerce')
+    df["權重"] = pd.to_numeric(df["權重"], errors="coerce")
+    df["人數"] = pd.to_numeric(df["人數"], errors="coerce")
+    df["股數"] = pd.to_numeric(df["股數"], errors="coerce")
     return df.dropna(subset=["資料日期"])
+
+@st.cache_data
+def get_price_data(sid, start_date, end_date):
+    ticker = f"{sid}.TW" if len(sid) == 4 else f"{sid}.TWO"
+    # 多抓 7 天確保均線與週五資料對齊
+    df = yf.download(ticker, start=start_date - timedelta(days=14), end=end_date + timedelta(days=1), progress=False)
+    return df
 
 stock_map = load_stock_map()
 
 # =========================
-# 分頁
+# 2. Sidebar 控制與 15 級勾選
 # =========================
-tab1, tab2 = st.tabs(["📊 全市場掃描排行", "🔍 個股深度分析"])
-
-# =========================
-# Tab 1: 全市場排行
-# =========================
-with tab1:
-    st.subheader("主力吸籌排行榜")
-    if os.path.exists("latest_snapshot.parquet"):
-        df_rank = load_snapshot()
-        display_df = df_rank.rename(columns={
-            "1000張變動": "1000張變動(%)",
-            "400張變動": "400張變動(%)",
-            "人數變動%": "股東人數變動(%)",
-            "最新1000張%": "最新1000張持股(%)"
-        })
-        display_df = display_df[[
-            "代號", "名稱", "1000張變動(%)", "400張變動(%)", "股東人數變動(%)", "最新1000張持股(%)"
-        ]]
-        st.dataframe(
-            display_df.style
-            .background_gradient(subset=["1000張變動(%)", "400張變動(%)"], cmap="Reds")
-            .background_gradient(subset=["股東人數變動(%)"], cmap="Greens_r"),
-            use_container_width=True, height=600
-        )
-    else:
-        st.warning("尚未偵測到排行榜資料")
-
-# =========================
-# Tab 2: 個股分析
-# =========================
-with tab2:
-    col1, col2 = st.columns([1, 4])
-    with col1:
-        sid = st.text_input("請輸入股號", value="2330").strip()
+with st.sidebar:
+    st.header("⚙️ 核心設定")
+    sid = st.text_input("輸入股號 (如 2330, 00981A)", value="2330").strip()
     
-    # 支援帶有字母的代號 (例如 00981A)
-    if not sid:
-        st.stop()
+    # 橫軸日期區間選取器 (月曆)
+    today = datetime.now()
+    d_range = st.date_input("選擇日期區間 (月曆選取)", [today - timedelta(days=120), today])
+    
+    st.divider()
+    st.subheader("👥 籌碼級別定義 (1-15級)")
+    big_lv = st.multiselect("🔴 大戶定義", options=list(range(1, 16)), default=[15], key="big")
+    mid_lv = st.multiselect("🟡 中間戶定義", options=list(range(1, 16)), default=[11, 12, 13, 14], key="mid")
+    small_lv = st.multiselect("🟢 散戶定義", options=list(range(1, 16)), default=[1, 2, 3, 4, 5, 6, 7], key="small")
 
-    folder = f"data/chip/{sid[:2]}"
-    path = f"{folder}/{sid}.parquet"
+# =========================
+# 3. 核心運算邏輯
+# =========================
+folder = f"data/chip/{sid[:2]}"
+path = f"{folder}/{sid}.parquet"
 
-    if os.path.exists(path):
-        with st.spinner("讀取資料中..."):
-            df = load_stock_data(path)
+if os.path.exists(path) and len(d_range) == 2:
+    start_dt, end_dt = pd.to_datetime(d_range[0]), pd.to_datetime(d_range[1])
+    
+    # 讀取並按日期區間過濾
+    raw_chip = load_stock_data(path)
+    df_chip = raw_chip[(raw_chip["資料日期"] >= start_dt) & (raw_chip["資料日期"] <= end_dt)]
+    
+    if df_chip.empty:
+        st.warning("此區間尚無籌碼資料，請嘗試拉長日期範圍。")
+    else:
+        # 抓取股價 (YFinance)
+        df_price = get_price_data(sid, start_dt, end_dt)
+        
+        # 建立週度指標表
+        weekly_rows = []
+        for d, sub in df_chip.groupby("資料日期"):
+            # 對齊當週收盤價與成交量
+            p_close = 0; p_vol = 0
+            if not df_price.empty:
+                price_match = df_price[df_price.index <= d]
+                if not price_match.empty:
+                    p_close = price_match['Close'].iloc[-1]
+                    p_vol = price_match['Volume'].iloc[-1]
 
-        st.subheader(f"{sid} {stock_map.get(sid, '')}")
+            # 聚合級別數據
+            def agg_lv(lvs):
+                m = sub["持股分級"].isin(lvs)
+                return sub.loc[m, "權重"].sum(), sub.loc[m, "人數"].sum(), sub.loc[m, "股數"].sum()
 
-        # --- 向量化計算 (已修正欄位名稱為 權重/人數) ---
-        grouped = df.groupby("資料日期")
-        res = pd.DataFrame({
-            "1000張%": grouped.apply(lambda x: x.loc[x["持股分級"] == 15, "權重"].sum()),
-            "400張%": grouped.apply(lambda x: x.loc[x["持股分級"] >= 11, "權重"].sum()),
-            "總人數": grouped["人數"].sum()
-        }).reset_index().rename(columns={"資料日期": "日期"})
+            b_w, b_p, b_s = agg_lv(big_lv)
+            m_w, m_p, m_s = agg_lv(mid_lv)
+            s_w, s_p, s_s = agg_lv(small_lv)
+            total_p = sub["人數"].sum()
+            total_s = sub["股數"].sum()
 
-        res = res.sort_values("日期")
+            weekly_rows.append({
+                "日期": d,
+                "股價": round(p_close, 2),
+                "成交量": int(p_vol),
+                "大戶%": round(b_w, 2),
+                "中間戶%": round(m_w, 2),
+                "散戶%": round(s_w, 2),
+                "總人數": int(total_p),
+                "人均張數": round((total_s / total_p) / 1000, 2) if total_p > 0 else 0,
+                "集中度(大+中)": round(b_w + m_w, 2)
+            })
 
-        # --- 指標卡 ---
-        if len(res) >= 2:
-            latest, prev = res.iloc[-1], res.iloc[-2]
-            c1, c2, c3 = st.columns(3)
-            c1.metric("1000張大戶比例", f"{latest['1000張%']:.2f}%", f"{latest['1000張%']-prev['1000張%']:.2f}%")
-            c2.metric("400張以上大戶", f"{latest['400張%']:.2f}%", f"{latest['400張%']-prev['400張%']:.2f}%")
-            c3.metric("總股東人數", f"{int(latest['總人數'])}", f"{latest['總人數']-prev['總人數']:.0f}", delta_color="inverse")
+        # 轉成 DataFrame 並計算變動
+        res = pd.DataFrame(weekly_rows).sort_values("日期", ascending=False)
+        res["大戶增減"] = res["大戶%"].diff(-1).fillna(0)
+        res["散戶增減"] = res["散戶%"].diff(-1).fillna(0)
+        res["人數增減"] = res["總人數"].diff(-1).fillna(0)
 
-        # --- 圖表 ---
-        fig = make_subplots(specs=[[{"secondary_y": True}]])
-        fig.add_trace(go.Bar(x=res["日期"], y=res["1000張%"], name="1000張%", marker_color='rgba(255, 99, 132, 0.6)'), secondary_y=False)
-        fig.add_trace(go.Scatter(x=res["日期"], y=res["400張%"], name="400張%", line=dict(color='firebrick')), secondary_y=False)
-        fig.add_trace(go.Scatter(x=res["日期"], y=res["總人數"], name="總人數", line=dict(color='royalblue')), secondary_y=True)
-        fig.update_layout(hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+        # 自動診斷邏輯
+        def get_diagnosis(row):
+            if row["大戶增減"] > 0 and row["人數增減"] < 0: return "🔴 強力吸籌"
+            if row["大戶增減"] > 0: return "🟡 主力加碼"
+            if row["散戶增減"] > 0.5: return "🟢 籌碼渙散"
+            return "⚪ 中性觀望"
+        res["診斷"] = res.apply(get_diagnosis, axis=1)
+
+        # =========================
+        # 4. 中部：三合一同步圖表
+        # =========================
+        fig = make_subplots(
+            rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03,
+            row_heights=[0.5, 0.2, 0.3],
+            subplot_titles=("價量籌碼對照圖", "", "股東人數走勢"),
+            specs=[[{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]]
+        )
+
+        # (1) K線與比例線
+        if not df_price.empty:
+            fig.add_trace(go.Candlestick(x=df_price.index, open=df_price['Open'], high=df_price['High'], low=df_price['Low'], close=df_price['Close'], name="K線"), row=1, col=1)
+        
+        fig.add_trace(go.Scatter(x=res["日期"], y=res["大戶%"], name="大戶%", line=dict(color='red', width=3)), row=1, col=1, secondary_y=True)
+        fig.add_trace(go.Scatter(x=res["日期"], y=res["散戶%"], name="散戶%", line=dict(color='green', width=2)), row=1, col=1, secondary_y=True)
+
+        # (2) 成交量柱狀圖 (紅漲綠跌)
+        if not df_price.empty:
+            v_colors = ['red' if c >= o else 'green' for o, c in zip(df_price['Open'], df_price['Close'])]
+            fig.add_trace(go.Bar(x=df_price.index, y=df_price['Volume'], name="成交量", marker_color=v_colors, opacity=0.5), row=2, col=1)
+
+        # (3) 總人數線
+        fig.add_trace(go.Scatter(x=res["日期"], y=res["總人數"], name="總人數", line=dict(color='royalblue', dash='dot')), row=3, col=1)
+
+        fig.update_layout(height=800, hovermode="x unified", xaxis_rangeslider_visible=False, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+        fig.update_xaxes(type='date', rangebreaks=[dict(bounds=["sat", "mon"])])
         st.plotly_chart(fig, use_container_width=True)
 
-        st.subheader("歷史明細")
-        st.dataframe(res.sort_values("日期", ascending=False), use_container_width=True)
-    else:
-        st.error(f"找不到 {sid} 的資料")
+        # =========================
+        # 5. 下部：詳細量化指標看板 (橫指標, 縱日期)
+        # =========================
+        st.subheader("📋 區間量化詳細指標看板")
+        
+        # 整理欄位顯示
+        view_cols = ["日期", "股價", "成交量", "大戶%", "大戶增減", "散戶%", "散戶增減", "總人數", "人數增減", "人均張數", "集中度(大+中)", "診斷"]
+        
+        styled_res = res[view_cols].style.format({
+            "股價": "{:.2f}", "成交量": "{:,}", "大戶%": "{:.2f}%", "大戶增減": "{:+.2f}%",
+            "散戶%": "{:.2f}%", "散戶增減": "{:+.2f}%", "總人數": "{:,}", "人數增減": "{:+,.0f}",
+            "集中度(大+中)": "{:.2f}%"
+        })
+        
+        # 加上條件顏色
+        def color_logic(val):
+            if isinstance(val, (int, float)):
+                if val > 0: return 'color: red'
+                if val < 0: return 'color: green'
+            return ''
+
+        st.dataframe(
+            styled_res.applymap(color_logic, subset=["大戶增減", "散戶增減", "人數增減"]),
+            use_container_width=True, height=500
+        )
+
+        # =========================
+        # 6. 底部：祥哥量化分析報告
+        # =========================
+        st.divider()
+        c1, c2, c3 = st.columns(3)
+        if len(res) >= 2:
+            first, last = res.iloc[-1], res.iloc[0]
+            with c1:
+                st.metric("區間大戶變動", f"{last['大戶%']:.2f}%", f"{last['大戶%']-first['大戶%']:.2f}%")
+            with c2:
+                st.metric("區間總人數變動", f"{last['總人數']:,} 人", f"{last['總人數']-first['總人數']:.0f} 人", delta_color="inverse")
+            with c3:
+                # 集中週數統計
+                conc_count = ((res["大戶增減"] > 0) & (res["人數增減"] < 0)).sum()
+                st.write(f"📊 **籌碼診斷：**")
+                st.write(f"- 區間集中週數: **{conc_count}** / {len(res)-1} 週")
+                st.write(f"- 價格相關性 (大戶/%): **{res[['大戶%', '股價']].corr().iloc[0,1]:.2f}**")
+
+else:
+    st.info("請於側邊欄輸入股號並確認日期區間，系統將自動啟動戰情看板。")
