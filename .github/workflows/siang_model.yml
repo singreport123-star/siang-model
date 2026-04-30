@@ -31,21 +31,26 @@ jobs:
 
       - name: Run Siang Model & Scanner
         run: |
+          # 執行爬蟲，重建 data/chip 資料夾
           python main.py
-          python scanner.py  # <--- 祥哥提醒：一定要補這行，總覽才會有資料！
+          # 執行掃描器，產出排行榜快照
+          python scanner.py
 
       - name: Commit and Push changes
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "Siang-Model-Bot"
 
+          # 處理剛才手動刪除造成的版本落後
           git pull --rebase origin main || echo "Rebase skipped"
 
-          # 檢查是否有新資料或新快照產出
+          # 強制追蹤所有變動，包含新產生的資料夾與檔案
+          git add .
+
+          # 檢查狀態，若有變動則提交並推送到雲端
           if [ -n "$(git status --porcelain)" ]; then
-            git add data/chip/ latest_snapshot.parquet stock_map.json
-            git commit -m "Siang Model: Auto Update $(date +'%Y-%m-%d %H:%M')"
-            git push
+            git commit -m "Siang Model: Database Rebuild & Update $(date +'%Y-%m-%d %H:%M')"
+            git push origin main
           else
             echo "No changes detected, skipping push."
           fi
