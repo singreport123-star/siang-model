@@ -25,16 +25,20 @@ def load_stock_data(path):
     df = pd.read_parquet(path)
     # 強制修正日期：防止 1970 Unix Timestamp 錯誤
     df["資料日期"] = pd.to_datetime(df["資料日期"].astype(str), format='%Y%m%d', errors='coerce')
-    df["權重"] = pd.to_numeric(df["權重"], errors="coerce")
-    df["人數"] = pd.to_numeric(df["人數"], errors="coerce")
-    df["股數"] = pd.to_numeric(df["股數"], errors="coerce")
+    df["權重"] = pd.to_numeric(df["權重"], errors="coerce").fillna(0)
+    df["人數"] = pd.to_numeric(df["人數"], errors="coerce").fillna(0)
+    df["股數"] = pd.to_numeric(df["股數"], errors="coerce").fillna(0)
     return df.dropna(subset=["資料日期"])
 
 @st.cache_data
 def get_price_data(sid, start_date, end_date):
+    # 判斷股號長度
     ticker = f"{sid}.TW" if len(sid) == 4 else f"{sid}.TWO"
-    # 多抓 7 天確保均線與週五資料對齊
+    # 多抓 14 天確保均線與週五資料對齊
     df = yf.download(ticker, start=start_date - timedelta(days=14), end=end_date + timedelta(days=1), progress=False)
+    # 移除 MultiIndex (yfinance v0.2.x 之後版本可能會有這問題)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
     return df
 
 stock_map = load_stock_map()
@@ -79,12 +83,15 @@ if os.path.exists(path) and len(d_range) == 2:
         weekly_rows = []
         for d, sub in df_chip.groupby("資料日期"):
             # 對齊當週收盤價與成交量
-            p_close = 0; p_vol = 0
+            p_close = 0.0
+            p_vol = 0.0
             if not df_price.empty:
+                # 找出小於等於當天日期的最後一筆價格
                 price_match = df_price[df_price.index <= d]
                 if not price_match.empty:
-                    p_close = price_match['Close'].iloc[-1]
-                    p_vol = price_match['Volume'].iloc[-1]
+                    # 使用 .iloc[-1] 取得最後一筆，並用 float() 強制轉換
+                    p_close = float(price_match['Close'].iloc[-1])
+                    p_vol = float(price_match['Volume'].iloc[-1])
 
             # 聚合級別數據
             def agg_lv(lvs):
@@ -100,7 +107,7 @@ if os.path.exists(path) and len(d_range) == 2:
             weekly_rows.append({
                 "日期": d,
                 "股價": round(p_close, 2),
-                "成交量": int(p_vol),
+                "成交量": int(p_vol) if not pd.isna(p_vol) else 0, # 防呆修正
                 "大戶%": round(b_w, 2),
                 "中間戶%": round(m_w, 2),
                 "散戶%": round(s_w, 2),
@@ -142,8 +149,10 @@ if os.path.exists(path) and len(d_range) == 2:
 
         # (2) 成交量柱狀圖 (紅漲綠跌)
         if not df_price.empty:
-            v_colors = ['red' if c >= o else 'green' for o, c in zip(df_price['Open'], df_price['Close'])]
-            fig.add_trace(go.Bar(x=df_price.index, y=df_price['Volume'], name="成交量", marker_color=v_colors, opacity=0.5), row=2, col=1)
+            # 確保 Close 跟 Open 沒有 NaN 才能比較
+            valid_price = df_price.dropna(subset=['Open', 'Close'])
+            v_colors = ['red' if c >= o else 'green' for o, c in zip(valid_price['Open'], valid_price['Close'])]
+            fig.add_trace(go.Bar(x=valid_price.index, y=valid_price['Volume'], name="成交量", marker_color=v_colors, opacity=0.5), row=2, col=1)
 
         # (3) 總人數線
         fig.add_trace(go.Scatter(x=res["日期"], y=res["總人數"], name="總人數", line=dict(color='royalblue', dash='dot')), row=3, col=1)
@@ -153,11 +162,9 @@ if os.path.exists(path) and len(d_range) == 2:
         st.plotly_chart(fig, use_container_width=True)
 
         # =========================
-        # 5. 下部：詳細量化指標看板 (橫指標, 縱日期)
+        # 5. 下部：詳細量化指標看板
         # =========================
         st.subheader("📋 區間量化詳細指標看板")
-        
-        # 整理欄位顯示
         view_cols = ["日期", "股價", "成交量", "大戶%", "大戶增減", "散戶%", "散戶增減", "總人數", "人數增減", "人均張數", "集中度(大+中)", "診斷"]
         
         styled_res = res[view_cols].style.format({
@@ -166,7 +173,6 @@ if os.path.exists(path) and len(d_range) == 2:
             "集中度(大+中)": "{:.2f}%"
         })
         
-        # 加上條件顏色
         def color_logic(val):
             if isinstance(val, (int, float)):
                 if val > 0: return 'color: red'
@@ -190,7 +196,6 @@ if os.path.exists(path) and len(d_range) == 2:
             with c2:
                 st.metric("區間總人數變動", f"{last['總人數']:,} 人", f"{last['總人數']-first['總人數']:.0f} 人", delta_color="inverse")
             with c3:
-                # 集中週數統計
                 conc_count = ((res["大戶增減"] > 0) & (res["人數增減"] < 0)).sum()
                 st.write(f"📊 **籌碼診斷：**")
                 st.write(f"- 區間集中週數: **{conc_count}** / {len(res)-1} 週")
