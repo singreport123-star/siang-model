@@ -4,11 +4,12 @@ import os
 import json
 from multiprocessing import Pool, cpu_count
 
+# 對齊 main.py 的更名結果
 REQUIRED_COLUMNS = [
     "資料日期",
     "持股分級",
-    "持股分級持股權重",
-    "持股分級人份",
+    "權重",
+    "人數",
 ]
 
 
@@ -36,17 +37,17 @@ def calculate_15x3_matrix(df: pd.DataFrame):
     latest_week = grouped.get_group(latest_date)
     prev_week = grouped.get_group(prev_date)
 
-    # --- 計算 ---
-    l_1000 = latest_week.loc[latest_week["持股分級"] == 15, "持股分級持股權重"].sum()
-    p_1000 = prev_week.loc[prev_week["持股分級"] == 15, "持股分級持股權重"].sum()
+    # --- 計算 (使用校準後的欄位) ---
+    l_1000 = latest_week.loc[latest_week["持股分級"] == 15, "權重"].sum()
+    p_1000 = prev_week.loc[prev_week["持股分級"] == 15, "權重"].sum()
     diff_1000 = round(l_1000 - p_1000, 2)
 
-    l_400 = latest_week.loc[latest_week["持股分級"] >= 11, "持股分級持股權重"].sum()
-    p_400 = prev_week.loc[prev_week["持股分級"] >= 11, "持股分級持股權重"].sum()
+    l_400 = latest_week.loc[latest_week["持股分級"] >= 11, "權重"].sum()
+    p_400 = prev_week.loc[prev_week["持股分級"] >= 11, "權重"].sum()
     diff_400 = round(l_400 - p_400, 2)
 
-    l_holders = latest_week["持股分級人份"].sum()
-    p_holders = prev_week["持股分級人份"].sum()
+    l_holders = latest_week["人數"].sum()
+    p_holders = prev_week["人數"].sum()
 
     if p_holders <= 0:
         holder_change_rate = None
@@ -71,6 +72,7 @@ def process_file(args):
         return None
 
     try:
+        # 只讀取必要欄位，並確保名稱與 main.py 一致
         df = pd.read_parquet(f, columns=REQUIRED_COLUMNS)
         matrix = calculate_15x3_matrix(df)
 
@@ -80,6 +82,7 @@ def process_file(args):
             return matrix
 
     except Exception as e:
+        # 如果舊資料欄位還沒更新，會在這邊噴錯是正常的，重新跑一次 main.py 就會修復
         print(f"⚠ 讀取 {stock_id} 失敗: {e}")
 
     return None
@@ -104,7 +107,7 @@ def run_scan():
     rows = [r for r in results if r]
 
     if not rows:
-        print("❌ 無資料（至少需兩週）")
+        print("❌ 無資料或欄位尚未對齊（請先確保 main.py 執行成功）")
         return
 
     snapshot = pd.DataFrame(rows)
@@ -117,7 +120,7 @@ def run_scan():
 
     snapshot.to_parquet("latest_snapshot.parquet", index=False)
 
-    print(f"✅ 完成：{len(rows)} 檔")
+    print(f"✅ 完成：{len(rows)} 檔標的快照已產出")
 
 
 if __name__ == "__main__":
