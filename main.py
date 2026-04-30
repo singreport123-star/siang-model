@@ -86,7 +86,17 @@ def fetch_chip():
         print("❌ 空資料")
         return False
 
+    # 欄位標準化與強制校準
     df.columns = [c.replace('%', '').replace(' ', '').strip() for c in df.columns]
+    
+    # 強制更名：對齊 scanner.py 的讀取邏輯
+    rename_map = {
+        "持股分級持股權重": "權重",
+        "持股分級人份": "人數",
+        "占集保庫存數比例": "權重" # 預防部分原始資料名稱不同
+    }
+    df = df.rename(columns=rename_map)
+
     df["證券代號"] = df["證券代號"].astype(str).str.strip()
     df = df[df["證券代號"].str.match(r"^[0-9A-Z]{4,6}$")]
 
