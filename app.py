@@ -8,13 +8,12 @@ import yfinance as yf
 from datetime import datetime, timedelta
 
 # =========================
-# 1. 基礎設定與資料讀取
+# 1. 基礎設定與快取讀取
 # =========================
 st.set_page_config(page_title="祥哥籌碼價量戰情室", layout="wide")
 
 @st.cache_data
 def load_stock_map():
-    """讀取證交所代號與名稱對照表"""
     if os.path.exists("stock_map.json"):
         with open("stock_map.json", "r", encoding="utf-8") as f:
             return json.load(f)
@@ -22,7 +21,6 @@ def load_stock_map():
 
 @st.cache_data
 def load_stock_data(path):
-    """讀取個股歷史籌碼 Parquet"""
     df = pd.read_parquet(path)
     df["資料日期"] = pd.to_datetime(df["資料日期"].astype(str), format='%Y%m%d', errors='coerce')
     df["權重"] = pd.to_numeric(df["權重"], errors="coerce").fillna(0)
@@ -32,7 +30,7 @@ def load_stock_data(path):
 
 @st.cache_data
 def get_price_data(sid, start_date, end_date):
-    """抓取 yfinance 價格，支援基金代號修正"""
+    # 基金 (如 00982A) 與一般股票代號處理
     if sid.endswith('A') or sid.endswith('B'):
         tickers = [f"{sid}.TW"]
     else:
@@ -64,7 +62,7 @@ with st.sidebar:
     sname = stock_map.get(sid, "")
     
     today = datetime.now()
-    d_range = st.date_input("選擇區間 (決定報告範圍)", [today - timedelta(days=120), today])
+    d_range = st.date_input("選擇區間 (量化分析範圍)", [today - timedelta(days=120), today])
     price_freq = st.radio("價量資料頻率", ["日資料", "週資料 (同步籌碼)"], index=0)
     
     st.divider()
@@ -77,7 +75,7 @@ with st.sidebar:
     st.caption("🚀 Powered by 祥哥籌碼模型 v3.5")
 
 # =========================
-# 3. 主頁面 Tabs 結構
+# 3. 主頁面 Tabs
 # =========================
 st.title(f"🚀 祥哥籌碼價量戰情室")
 
@@ -91,7 +89,7 @@ with tab1:
     if os.path.exists(snapshot_path):
         df_rank = pd.read_parquet(snapshot_path)
         
-        # 欄位對齊修正：將 scanner.py 產出的欄位名稱轉為介面名稱
+        # 欄位對齊：將 scanner.py 的輸出轉為介面名稱
         rename_map = {
             "代號": "股號", 
             "1000張變動": "大戶週增減", 
@@ -100,25 +98,17 @@ with tab1:
         }
         df_rank = df_rank.rename(columns=rename_map)
 
-        # 市場快照統計卡
+        # 指標卡區域
         c1, c2, c3 = st.columns(3)
         total_stocks = len(df_rank)
-        # 定義籌碼集中：大戶增 且 人數減
         concentrated = len(df_rank[(df_rank["大戶週增減"] > 0) & (df_rank["人數變動"] < 0)])
         
         c1.metric("監控總股數", f"{total_stocks} 檔")
         c2.metric("籌碼集中標的", f"{concentrated} 檔", delta=f"{concentrated/total_stocks:.1%}")
-        c3.metric("市場氣氛判斷", "🔥 火熱" if concentrated/total_stocks > 0.15 else "☁ 觀望")
-
-        # 診斷與顯示
-        def rank_diag(row):
-            if row["大戶週增減"] > 0.8 and row["人數變動"] < 0: return "🔴 強力吸籌"
-            if row["大戶週增減"] > 0: return "🟡 主力加碼"
-            return "⚪ 中性觀望"
-        df_rank["祥哥診斷"] = df_rank.apply(rank_diag, axis=1)
+        c3.metric("市場氣氛", "🔥 火熱" if concentrated/total_stocks > 0.15 else "☁ 觀望")
 
         st.dataframe(
-            df_rank[["股號", "名稱", "大戶%", "大戶週增減", "400張變動", "人數變動", "祥哥診斷"]].sort_values("大戶週增減", ascending=False).style.map(
+            df_rank[["股號", "名稱", "大戶%", "大戶週增減", "400張變動", "人數變動"]].sort_values("大戶週增減", ascending=False).style.map(
                 lambda x: 'color: red' if isinstance(x, (int, float)) and x > 0 else 'color: green' if isinstance(x, (int, float)) and x < 0 else '',
                 subset=["大戶週增減", "400張變動", "人數變動"]
             ), use_container_width=True, height=600
@@ -143,7 +133,7 @@ with tab2:
         else:
             df_price = get_price_data(sid, start_dt, end_dt)
             
-            # 籌碼數據彙整
+            # 指標彙整
             weekly_rows = []
             for d, sub in df_chip.groupby("資料日期"):
                 p_close = 0.0; p_vol = 0.0
@@ -168,12 +158,10 @@ with tab2:
 
             res = pd.DataFrame(weekly_rows).sort_values("日期", ascending=False)
             res["大戶增減"] = res["大戶%"].diff(-1).fillna(0)
-            res["散戶增減"] = res["散戶%"].diff(-1).fillna(0)
             res["人數增減"] = res["總人數"].diff(-1).fillna(0)
 
-            # --- 圖表區 ---
+            # --- 同步圖表 ---
             fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.5, 0.2, 0.3], specs=[[{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]])
-            
             plot_p = df_price.copy()
             if price_freq == "週資料 (同步籌碼)":
                 plot_p = df_price.resample('W-FRI').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
@@ -191,11 +179,11 @@ with tab2:
             fig.update_yaxes(title_text="人數", row=3, col=1, tickformat=",.0f")
             st.plotly_chart(fig, use_container_width=True)
 
-            # --- 指標看板 ---
+            # --- 詳細指標看板 ---
             st.subheader("📋 詳細指標看板")
             res_view = res.copy()
             res_view["日期"] = res_view["日期"].dt.strftime('%Y-%m-%d')
-            st.dataframe(res_view.style.map(lambda x: 'color: red' if isinstance(x, (int, float)) and x > 0 else 'color: green' if isinstance(x, (int, float)) and x < 0 else '', subset=["大戶增減", "散戶增減", "人數增減"]), use_container_width=True)
+            st.dataframe(res_view.style.map(lambda x: 'color: red' if isinstance(x, (int, float)) and x > 0 else 'color: green' if isinstance(x, (int, float)) and x < 0 else '', subset=["大戶增減", "人數增減"]), use_container_width=True)
 
             # --- 祥哥區間量化報告 ---
             st.divider()
@@ -205,18 +193,16 @@ with tab2:
                 c1, c2, c3 = st.columns(3)
                 with c1:
                     st.write("**💰 區間總變動**")
-                    st.metric("大戶持股變動", f"{last['大戶%']:.2f}%", f"{last['大戶%']-first['大戶%']:.2f}%")
+                    st.metric("大戶比例淨變動", f"{last['大戶%']:.2f}%", f"{last['大戶%']-first['大戶%']:.2f}%")
                     st.metric("總人數增減", f"{last['總人數']:,} 人", f"{last['總人數']-first['總人數']:.0f} 人", delta_color="inverse")
                 with c2:
-                    st.write("**📈 持續性與相關性**")
+                    st.write("**📈 慣性與相關性**")
                     conc_count = ((res["大戶增減"] > 0) & (res["人數增減"] < 0)).sum()
-                    st.info(f"區間集中慣性: **{conc_count}** / {len(res)-1} 週")
+                    st.info(f"區間集中週數: **{conc_count}** / {len(res)-1} 週")
                     corr = res[['大戶%', '股價']].corr().iloc[0,1]
                     st.write(f"大戶/股價相關係數: **{corr:.2f}**")
                 with c3:
                     st.write("**📝 綜合判斷**")
-                    if last['大戶%'] > first['大戶%'] and last['總人數'] < first['總人數']: st.success("✅ 【強力吸籌】籌碼集中度極高")
-                    elif last['大戶%'] < first['大戶%']: st.error("⚠️ 【籌碼渙散】注意主力撤出風險")
-                    else: st.warning("⚪ 【盤整換手】多空勢力處於拉鋸")
-            else:
-                st.info("💡 區間報告需至少兩週資料進行計算。")
+                    if last['大戶%'] > first['大戶%'] and last['總人數'] < first['總人數']: st.success("✅ 【強力吸籌】籌碼高度集中")
+                    elif last['大戶%'] < first['大戶%']: st.error("⚠️ 【籌碼渙散】注意主力撤出")
+                    else: st.warning("⚪ 【換手整理】多空勢力拉鋸中")
