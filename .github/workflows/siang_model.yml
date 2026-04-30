@@ -29,9 +29,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas requests lxml html5lib beautifulsoup4 pyarrow yfinance
 
-      - name: Run Siang Model
+      - name: Run Siang Model & Scanner
         run: |
           python main.py
+          python scanner.py  # <--- 祥哥提醒：一定要補這行，總覽才會有資料！
 
       - name: Commit and Push changes
         run: |
@@ -40,8 +41,9 @@ jobs:
 
           git pull --rebase origin main || echo "Rebase skipped"
 
+          # 檢查是否有新資料或新快照產出
           if [ -n "$(git status --porcelain)" ]; then
-            git add .
+            git add data/chip/ latest_snapshot.parquet stock_map.json
             git commit -m "Siang Model: Auto Update $(date +'%Y-%m-%d %H:%M')"
             git push
           else
