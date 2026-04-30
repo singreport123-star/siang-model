@@ -42,16 +42,11 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "Siang-Model-Bot"
-
-          # 解決雲端狀態落後問題
           git pull --rebase origin main || git rebase --abort
-
-          # 修正：用 git add -A 取代 "git add data/ ."，避免 data/ 不存在時報錯
           git add -A
-
           if [ -n "$(git status --porcelain)" ]; then
-            git commit -m "🚀 Siang Model: Data & Snapshot Update $(date +'%Y-%m-%d %H:%M')"
+            git commit -m "🚀 Siang Model: Database Update $(date +'%Y-%m-%d %H:%M')"
             git push origin main
           else
-            echo "No changes found, skipping push."
+            echo "No changes found."
           fi
