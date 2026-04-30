@@ -1,9 +1,14 @@
 name: Siang Model Engine
+
 on:
   schedule:
-    # 每週五 台灣時間 16:00（UTC 08:00）
     - cron: '0 8 * * 5'
   workflow_dispatch:
+
+concurrency:
+  group: siang-model
+  cancel-in-progress: true
+
 
 jobs:
   build:
@@ -12,45 +17,32 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GH_TOKEN }}
           fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN }}
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-          cache: 'pip'
+          python-version: "3.10"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pandas requests lxml html5lib beautifulsoup4 pyarrow yfinance
+      - run: pip install pandas requests lxml beautifulsoup4 pyarrow yfinance
 
-      - name: Run Siang Model & Scanner
+      - name: run
         run: |
-          # 執行爬蟲，重建 data/chip 資料夾
           python main.py
-          # 執行掃描器，產出排行榜快照
+          sleep 10
           python scanner.py
 
-      - name: Commit and Push changes
+      - name: commit
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "Siang-Model-Bot"
+          git config user.name "Siang-Bot"
+          git config user.email "bot@github.com"
 
-          # 處理剛才手動刪除造成的版本落後
-          git pull --rebase origin main || echo "Rebase skipped"
-
-          # 強制追蹤所有變動，包含新產生的資料夾與檔案
+          git pull --rebase origin main || true
           git add .
 
-          # 檢查狀態，若有變動則提交並推送到雲端
           if [ -n "$(git status --porcelain)" ]; then
-            git commit -m "Siang Model: Database Rebuild & Update $(date +'%Y-%m-%d %H:%M')"
-            git push origin main
-          else
-            echo "No changes detected, skipping push."
+            git commit -m "update $(date)"
+            git push
           fi
