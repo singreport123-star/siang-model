@@ -3,111 +3,162 @@ import requests
 import io
 import os
 import json
+import subprocess
+import sys
+import time
 from datetime import datetime
 
 # =========================
-# 1. mapping (解決 TWSE 格式不穩與漏標的顧慮)
+# 1. mapping (低頻更新)
 # =========================
 def update_mapping():
     print("🚀 [Siang-Model] mapping update...")
-    
+
     urls = [
-        "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", # 上市
-        "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"  # 上櫃
+        "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2",
+        "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"
     ]
-    
+
     mapping = {}
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
 
     for url in urls:
         try:
-            # 使用 html5lib 作為備援解析器，解決 mapping 出現 0 筆的問題
             res = requests.get(url, headers=headers, timeout=30)
-            tables = pd.read_html(io.StringIO(res.text), flavor='html5lib')
-            
+            res.raise_for_status()
+
+            tables = pd.read_html(io.StringIO(res.text))
+
             for df in tables:
-                # 祥哥顧慮：表格格式可能變動。
-                # 策略：地毯式掃描所有儲存格內容。
-                for val in df.astype(str).values.flatten():
-                    # 支援全形或半形空白分隔的「代號 名稱」
-                    if "　" in val or " " in val:
-                        sep = "　" if "　" in val else " "
-                        parts = val.split(sep, 1)
-                        code, name = parts[0].strip(), parts[1].strip()
-                        
-                        # 只要代號符合 4~6 碼特徵 (含 00981A)
-                        if 4 <= len(code) <= 6:
-                            mapping[code] = name
+                if "有價證券代號及名稱" not in df.columns:
+                    continue
+
+                for val in df["有價證券代號及名稱"].dropna():
+                    if "　" in val:
+                        code, name = val.split("　", 1)
+                        mapping[code.strip()] = name.strip()
+
         except Exception as e:
             print(f"⚠ mapping warning: {e}")
 
-    # 存檔供網頁讀取
-    with open("stock_map.json", "w", encoding="utf-8") as f:
+    tmp = "stock_map.json.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(mapping, f, ensure_ascii=False, indent=2)
+
+    os.replace(tmp, "stock_map.json")
+
     print(f"✅ mapping done: {len(mapping)} 筆標的")
 
+
+def ensure_mapping():
+    if not os.path.exists("stock_map.json"):
+        update_mapping()
+        return
+
+    # 超過7天才更新
+    if time.time() - os.path.getmtime("stock_map.json") > 7 * 86400:
+        update_mapping()
+
+
 # =========================
-# 2. TDCC 抓取與 Parquet 封存 (解決重定向與不漏資料)
+# 2. TDCC 抓取
 # =========================
 def fetch_chip():
     print("🚀 [Siang-Model] TDCC fetch...")
-    url = "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5"
-    
-    # 解決 Exceeded 30 redirects：模擬真實瀏覽器行為
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    }
 
-    try:
-        # allow_redirects=True 並增加更長的 timeout 預防爆掉
-        res = requests.get(url, headers=headers, timeout=60, allow_redirects=True)
-        res.raise_for_status()
-        
-        # 讀取 CSV
-        df = pd.read_csv(io.BytesIO(res.content))
-    except Exception as e:
-        print(f"❌ download/parse fail: {e}")
-        return
+    url = "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+
+    # retry 機制
+    for i in range(3):
+        try:
+            res = requests.get(url, headers=headers, timeout=60)
+            res.raise_for_status()
+            df = pd.read_csv(io.BytesIO(res.content))
+            break
+        except Exception as e:
+            print(f"⚠ retry {i+1}/3: {e}")
+            if i == 2:
+                print("❌ TDCC 下載失敗")
+                return False
 
     if df.empty:
-        return
+        print("❌ 空資料")
+        return False
 
-    # 欄位標準化：移除 % 符號、移除空白，預防 Parquet 報錯
     df.columns = [c.replace('%', '').replace(' ', '').strip() for c in df.columns]
     df["證券代號"] = df["證券代號"].astype(str).str.strip()
-    
-    # 過濾非法標的，精確保留 4~6 碼 (包含帶字母的 00981A)
     df = df[df["證券代號"].str.match(r"^[0-9A-Z]{4,6}$")]
-    
+
     date = str(df["資料日期"].iloc[0])
     print(f"📅 Data Date: {date}")
 
-    # =========================
-    # 3. 分層儲存 (不爆記憶體、不求快、只求穩)
-    # =========================
     for sn, sub_df in df.groupby("證券代號"):
         folder = f"data/chip/{sn[:2]}"
         os.makedirs(folder, exist_ok=True)
+
         path = f"{folder}/{sn}.parquet"
 
-        if os.path.exists(path):
-            try:
+        try:
+            if os.path.exists(path):
                 old = pd.read_parquet(path)
-                # 核心去重：避免同一週重複存入
                 combined = pd.concat([old, sub_df]).drop_duplicates(
                     subset=["資料日期", "持股分級"], keep="last"
                 )
-                combined.to_parquet(path, index=False, engine='pyarrow')
-            except:
-                sub_df.to_parquet(path, index=False, engine='pyarrow')
-        else:
-            sub_df.to_parquet(path, index=False, engine='pyarrow')
+            else:
+                combined = sub_df
 
-    print(f"✅ Siang Model 數據同步成功完成")
+            combined = combined.sort_values("資料日期")
 
+            # atomic write
+            tmp_path = path + ".tmp"
+            combined.to_parquet(tmp_path, index=False)
+            os.replace(tmp_path, path)
+
+        except Exception as e:
+            print(f"⚠ 寫入失敗 {sn}: {e}")
+
+    print("✅ 數據同步完成")
+    return True
+
+
+# =========================
+# 3. 呼叫 scanner
+# =========================
+def run_scanner():
+    print("🚀 [Siang-Model] 啟動掃描器...")
+
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        scanner_path = os.path.join(base_dir, "scanner.py")
+
+        subprocess.run(
+            [sys.executable, scanner_path],
+            check=True
+        )
+
+        print("✅ 排行榜快照更新成功")
+
+    except subprocess.CalledProcessError:
+        print("❌ 掃描器執行失敗")
+
+    except Exception as e:
+        print(f"⚠ scanner error: {e}")
+
+
+# =========================
+# 主流程
+# =========================
 if __name__ == "__main__":
     start = datetime.now()
-    update_mapping()
-    fetch_chip()
+
+    ensure_mapping()   # 低頻更新 mapping
+
+    ok = fetch_chip()  # 主資料
+
+    if ok:
+        run_scanner()  # 只有成功才跑
+    else:
+        print("❌ 資料更新失敗，跳過 scanner")
+
     print(f"🎯 總耗時: {datetime.now() - start}")
