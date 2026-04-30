@@ -1,5 +1,4 @@
 name: Siang Model Engine
-
 on:
   schedule:
     - cron: '0 8 * * 5'
@@ -9,6 +8,9 @@ concurrency:
   group: siang-model
   cancel-in-progress: true
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -16,43 +18,40 @@ jobs:
       contents: write
 
     steps:
-      # 1️⃣ 下載 repo
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           token: ${{ secrets.GH_TOKEN }}
+          fetch-depth: 0
 
-      # 2️⃣ Python 環境
-      - name: Setup Python
+      - name: Python setup
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      # 3️⃣ 安裝套件
-      - name: Install dependencies
-        run: |
-          pip install pandas requests lxml html5lib beautifulsoup4 pyarrow yfinance
+      - name: Install
+        run: pip install pandas requests lxml html5lib beautifulsoup4 pyarrow yfinance
 
-      # 4️⃣ 執行資料抓取 + 掃描
       - name: Run model & scanner
         run: |
           python main.py
-          sleep 15
+          sleep 10
           python scanner.py
 
-      # 5️⃣ Commit & Push（✅ 已修正，不會再刪資料）
-      - name: Commit & Push
+      - name: Commit and Push
         run: |
-          git config user.email "action@github.com"
-          git config user.name "Siang-Model-Bot"
+          git config --local user.email "action@github.com"
+          git config --local user.name "Siang-Model-Bot"
 
-          # ❗不要 reset（之前 bug 在這）
+          # 解決雲端狀態落後問題
+          git pull --rebase origin main || git rebase --abort
+
+          # 修正：用 git add -A 取代 "git add data/ ."，避免 data/ 不存在時報錯
           git add -A
 
           if [ -n "$(git status --porcelain)" ]; then
-            git commit -m "🚀 Data Sync $(date +'%Y-%m-%d %H:%M')"
+            git commit -m "🚀 Siang Model: Data & Snapshot Update $(date +'%Y-%m-%d %H:%M')"
             git push origin main
           else
-            echo "No changes to commit"
+            echo "No changes found, skipping push."
           fi
