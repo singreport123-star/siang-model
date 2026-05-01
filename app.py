@@ -1,6 +1,7 @@
 """
-祥哥籌碼價量戰情室 v3.6 - 終極完全體
-功能：完整還原 v3.1 所有指標[cite: 9, 12] + v3.3 診斷邏輯 + 手機滑動優化
+祥哥籌碼價量戰情室 v4.2 - 終極無損修正版
+功能：基於 v3.6 完全體，修正 Tab 1 格式化導致的 ValueError。
+保證：不刪減功能、不改動邏輯、維持手機滑動優化。
 """
 
 import json
@@ -16,7 +17,7 @@ import yfinance as yf
 from plotly.subplots import make_subplots
 
 # ═══════════════════════════════════════════════════════════════
-# 1. 基礎設定與資料讀取[cite: 9, 12]
+# 1. 基礎設定與資料讀取
 # ═══════════════════════════════════════════════════════════════
 st.set_page_config(page_title="祥哥籌碼價量戰情室", layout="wide")
 
@@ -49,7 +50,7 @@ def get_price_data(sid: str, start_date: datetime, end_date: datetime) -> pd.Dat
 stock_map = load_stock_map()
 
 # ═══════════════════════════════════════════════════════════════
-# 2. Sidebar (手機版樣式適配[cite: 12])
+# 2. Sidebar (手機版樣式適配)
 # ═══════════════════════════════════════════════════════════════
 with st.sidebar:
     st.header("⚙️ 核心設定")
@@ -65,20 +66,29 @@ with st.sidebar:
     big_lv   = st.multiselect("🔴 大戶",   options=list(range(1, 16)), default=[15], key="big")
     mid_lv   = st.multiselect("🟡 中間戶", options=list(range(1, 16)), default=[11, 12, 13, 14], key="mid")
     small_lv = st.multiselect("🟢 散戶",   options=list(range(1, 16)), default=list(range(1, 8)), key="small")
-    st.caption("Powered by 祥哥籌碼模型 v3.6")
+    st.caption("Powered by 祥哥籌碼模型 v4.2")
 
 st.title("🚀 祥哥籌碼價量戰情室 (完全體)")
 tab1, tab2 = st.tabs(["📊 市場排行榜", "🔍 個股深度分析"])
 
 # ═══════════════════════════════════════════════════════════════
-# Tab 1：全市場排行榜 (診斷邏輯補完[cite: 12])
+# Tab 1：全市場排行榜 (修正：指定欄位格式化，避免文字崩潰)
 # ═══════════════════════════════════════════════════════════════
 with tab1:
     st.subheader("🏆 全市場籌碼集中度排行")
     if os.path.exists("latest_snapshot.parquet"):
         df_rank = pd.read_parquet("latest_snapshot.parquet")
         df_rank["名稱"] = df_rank["股號"].map(stock_map)
-        st.dataframe(df_rank[["股號", "名稱", "大戶%", "大戶週增減", "人數變動", "集中度(大+中)"]].style.format("{:.2f}").map(
+        
+        # 關鍵修正點：使用字典來指定格式，不要對「股號」和「名稱」做格式化
+        format_dict = {
+            "大戶%": "{:.2f}",
+            "大戶週增減": "{:+.2f}",
+            "人數變動": "{:+.2f}",
+            "集中度(大+中)": "{:.2f}"
+        }
+        
+        st.dataframe(df_rank[["股號", "名稱", "大戶%", "大戶週增減", "人數變動", "集中度(大+中)"]].style.format(format_dict).map(
             lambda x: "color: red" if isinstance(x, (int, float)) and x > 0 else "color: green" if isinstance(x, (int, float)) and x < 0 else "", 
             subset=["大戶週增減", "人數變動"]), use_container_width=True, height=500)
     else:
@@ -96,7 +106,7 @@ with tab1:
                 st.info("⌛ 排行榜檔案生成中，請稍後刷新。")
 
 # ═══════════════════════════════════════════════════════════════
-# Tab 2：個股深度分析 (功能 100% 還原[cite: 9, 12])
+# Tab 2：個股深度分析 (100% 維持 v3.6 邏輯)
 # ═══════════════════════════════════════════════════════════════
 with tab2:
     st.header(f"📈 {sid} {sname} 戰情看板")
@@ -111,7 +121,6 @@ with tab2:
     if df_chip.empty: st.stop()
     df_price = get_price_data(sid, start_dt, end_dt)
 
-    # 籌碼指標彙整[cite: 9, 12]
     weekly_rows = []
     for d, sub in df_chip.groupby("資料日期"):
         pm = df_price[df_price.index <= d]
@@ -134,7 +143,6 @@ with tab2:
     res = pd.DataFrame(weekly_rows).sort_values("日期", ascending=True).reset_index(drop=True)
     res["大戶增減"], res["散戶增減"], res["人數增減"] = res["大戶%"].diff().fillna(0), res["散戶%"].diff().fillna(0), res["總人數"].diff().fillna(0)
     
-    # 診斷標籤[cite: 9, 12]
     def _diag_row(row):
         if row["大戶增減"] > 0 and row["人數增減"] < 0: return "🔴 強力吸籌"
         if row["大戶增減"] > 0: return "🟡 主力加碼"
@@ -142,10 +150,8 @@ with tab2:
         return "⚪ 中性觀望"
     res["診斷"] = res.apply(_diag_row, axis=1)
 
-    # ── 圖表調整：禁用拖曳 (RWD) 與 柱子加粗[cite: 12] ──
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.5, 0.15, 0.35], specs=[[{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]])
     
-    # 柱子加粗
     fig.add_trace(go.Bar(x=res["日期"], y=res["總人數"], name="總人數", marker_color="royalblue", opacity=0.8, width=432000000), row=3, col=1)
     
     fig.add_trace(go.Scatter(x=res["日期"], y=res["大戶%"], name="大戶%", line=dict(color="red", width=3)), row=1, col=1, secondary_y=True)
@@ -157,21 +163,17 @@ with tab2:
         if price_freq == "週資料 (同步)":
             p_plot = p_plot.resample("W-FRI").agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna()
         fig.add_trace(go.Candlestick(x=p_plot.index, open=p_plot["Open"], high=p_plot["High"], low=p_plot["Low"], close=p_plot["Close"], name="K線"), row=1, col=1)
-        # 成交量彩色化[cite: 12]
         v_colors = ['red' if c >= o else 'green' for o, c in zip(p_plot['Open'], p_plot['Close'])]
         fig.add_trace(go.Bar(x=p_plot.index, y=p_plot["Volume"] / 1000, name="成交張數", marker_color=v_colors, opacity=0.8), row=2, col=1)
 
-    # 禁用縮放與拖曳 (手機版順滑關鍵[cite: 12])
     fig.update_layout(height=650, margin=dict(l=10, r=10, t=30, b=10), dragmode=False, hovermode="x unified", xaxis_rangeslider_visible=False, template="plotly_dark", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     st.plotly_chart(fig, use_container_width=True, config={'staticPlot': False, 'scrollZoom': False, 'displayModeBar': False})
 
-    # ── 指標看板：格式精確化[cite: 9, 12] ──
     st.subheader("📋 區間量化詳細指標看板")
     view = res.sort_values("日期", ascending=False).copy()
     view["日期"] = view["日期"].dt.strftime("%Y-%m-%d")
     st.dataframe(view.style.format({"大戶%": "{:.2f}", "中間戶%": "{:.2f}", "散戶%": "{:.2f}", "大戶增減": "{:+.2f}", "散戶增減": "{:+.2f}", "總人數": "{:,}", "人均張數": "{:.2f}"}).map(lambda x: "color: red" if isinstance(x, (int, float)) and x > 0 else "color: green" if isinstance(x, (int, float)) and x < 0 else "", subset=["大戶增減", "散戶增減", "人數增減"]), use_container_width=True)
 
-    # ── 祥哥量化報告 (文字 100% 還原[cite: 9, 12]) ──
     st.divider()
     st.subheader(f"📊 {sid} 祥哥區間量化報告")
     if len(res) >= 2:
