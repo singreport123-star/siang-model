@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GH_TOKEN }}
-          fetch-depth: 0 # 必須設為 0 才能進行 rebase 合併[cite: 16]
+          fetch-depth: 0
 
       - name: 🐍 Python setup
         uses: actions/setup-python@v5
@@ -35,33 +35,32 @@ jobs:
       - name: 📦 Install dependencies
         run: |
           pip install --upgrade pip
-          pip install pandas requests lxml html5lib beautifulsoup4 pyarrow yfinance[cite: 14]
+          pip install pandas requests lxml html5lib beautifulsoup4 pyarrow yfinance
 
       - name: 🚀 Run model (下載籌碼)
-        run: python main.py[cite: 13]
+        run: python main.py
 
       - name: ⏳ Wait for filesystem sync
-        run: sleep 10[cite: 16]
+        run: sleep 10
 
       - name: 📊 Run scanner (全市場掃描)
-        run: python scanner.py[cite: 15]
+        run: python scanner.py
 
-      - name: 💾 Commit and Push (修正版順序)
+      - name: 💾 Commit and Push (修復同步衝突順序)
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "Siang-Model-Bot"
           
-          # 1. 先標記所有變動，解決 unstaged changes 報錯
+          # 1. 先將所有新抓到的資料加入標記，解除 Git 的 unstaged 狀態
           git add -A
           
-          # 2. 檢查是否有新資料需要 commit
+          # 2. 拉取遠端變動並進行 rebase
+          # 這一步在 add 之後執行就不會再噴 exit code 128
+          git pull --rebase origin main || git rebase --abort
+          
+          # 3. 檢查是否有真正的新資料需要 commit
           if [ -n "$(git status --porcelain)" ]; then
             git commit -m "🚀 Siang Model: Database Update $(date +'%Y-%m-%d %H:%M')"
-            
-            # 3. Commit 後再進行同步，這時 rebase 就不會報錯
-            git pull --rebase origin main || git rebase --abort
-            
-            # 4. 推送到雲端
             git push origin main
           else
             echo "No changes to commit."
