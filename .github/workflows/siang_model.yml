@@ -46,21 +46,24 @@ jobs:
       - name: 📊 Run scanner (全市場掃描)
         run: python scanner.py
 
-      - name: 💾 Commit and Push (修復同步衝突順序)
+      - name: 💾 Commit and Push (同步邏輯最終優化版)
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "Siang-Model-Bot"
           
-          # 1. 先將所有新抓到的資料加入標記，解除 Git 的 unstaged 狀態
+          # 1. 標記變動：把 Python 產出的新資料加入暫存
           git add -A
           
-          # 2. 拉取遠端變動並進行 rebase
-          # 這一步在 add 之後執行就不會再噴 exit code 128
-          git pull --rebase origin main || git rebase --abort
-          
-          # 3. 檢查是否有真正的新資料需要 commit
+          # 2. 檢查是否有變動
           if [ -n "$(git status --porcelain)" ]; then
+            # 3. 關鍵修正：先 Commit 鎖定資料，清除暫存區 Index 負擔
             git commit -m "🚀 Siang Model: Database Update $(date +'%Y-%m-%d %H:%M')"
+            
+            # 4. 資料鎖定後，執行 rebase 合併就不會噴 128 錯誤
+            # 如果雲端有變動，會把你的 Commit 接在後面
+            git pull --rebase origin main || (git rebase --abort && exit 1)
+            
+            # 5. 推送回 GitHub
             git push origin main
           else
             echo "No changes to commit."
@@ -69,4 +72,4 @@ jobs:
       - name: ❌ Notify on failure
         if: failure()
         run: |
-          echo "::error::祥哥籌碼模型執行失敗！請至 Actions 查看詳細日誌。"
+          echo "::error::祥哥籌碼模型執行失敗！請確認 main.py 與 Git 同步狀態。"
