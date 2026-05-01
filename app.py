@@ -1,7 +1,8 @@
 """
-祥哥籌碼價量戰情室 v4.3 - 終極無損修正版
-功能：修正日期格式解析相容性，確保 Tab 2 個股報告能正確抓到多週資料。
-保證：完全保留 v3.6/v4.2 所有視覺與診斷功能，包含手機滑動優化。
+祥哥籌碼價量戰情室 v4.4 - 功能定稿版
+1. 排行榜：各欄位補上單位 (如 %, 人)。
+2. 深度分析：底部新增「持續性分析」與「綜合判斷」之邏輯定義。
+3. 穩定鎖定：維持寬鬆日期解析、彩色張數、手機優化、診斷邏輯。
 """
 
 import json
@@ -29,7 +30,6 @@ def load_stock_map() -> dict[str, str]:
 @st.cache_data
 def load_stock_data(path: str) -> pd.DataFrame:
     df = pd.read_parquet(path)
-    # 關鍵修正：移除 format="%Y%m%d"，改用寬鬆解析，自動相容 20260501 與 2026-05-01
     df["資料日期"] = pd.to_datetime(df["資料日期"].astype(str), errors="coerce")
     for col in ["權重", "人數", "股數"]:
         if col in df.columns:
@@ -51,7 +51,7 @@ def get_price_data(sid: str, start_date: datetime, end_date: datetime) -> pd.Dat
 stock_map = load_stock_map()
 
 # ═══════════════════════════════════════════════════════════════
-# 2. Sidebar (手機版樣式適配)
+# 2. Sidebar
 # ═══════════════════════════════════════════════════════════════
 with st.sidebar:
     st.header("⚙️ 核心設定")
@@ -59,7 +59,6 @@ with st.sidebar:
     selected_stock = st.selectbox("搜尋標的", options=stock_options if stock_options else ["2330 台積電"])
     sid = selected_stock.split(" ")[0]
     sname = stock_map.get(sid, "")
-    # 增加日期緩衝，確保能抓到所有歷史點
     d_range = st.date_input("選擇區間", [datetime.now() - timedelta(days=180), datetime.now()])
     price_freq = st.radio("價量頻率", ["日資料", "週資料 (同步)"], index=0)
 
@@ -68,13 +67,13 @@ with st.sidebar:
     big_lv   = st.multiselect("🔴 大戶",   options=list(range(1, 16)), default=[15], key="big")
     mid_lv   = st.multiselect("🟡 中間戶", options=list(range(1, 16)), default=[11, 12, 13, 14], key="mid")
     small_lv = st.multiselect("🟢 散戶",   options=list(range(1, 16)), default=list(range(1, 8)), key="small")
-    st.caption("Powered by 祥哥籌碼模型 v4.3")
+    st.caption("Powered by 祥哥籌碼模型 v4.4")
 
 st.title("🚀 祥哥籌碼價量戰情室 (完全體)")
 tab1, tab2 = st.tabs(["📊 市場排行榜", "🔍 個股深度分析"])
 
 # ═══════════════════════════════════════════════════════════════
-# Tab 1：全市場排行榜
+# Tab 1：全市場排行榜 (新增單位備註)
 # ═══════════════════════════════════════════════════════════════
 with tab1:
     st.subheader("🏆 全市場籌碼集中度排行")
@@ -82,25 +81,30 @@ with tab1:
         df_rank = pd.read_parquet("latest_snapshot.parquet")
         df_rank["名稱"] = df_rank["股號"].map(stock_map)
         
+        # 1. 增加單位標示
+        df_rank = df_rank.rename(columns={
+            "大戶%": "大戶 (%)",
+            "大戶週增減": "大戶週增減 (%)",
+            "人數變動": "人數變動 (人)",
+            "集中度(大+中)": "集中度 (大+中) (%)"
+        })
+        
+        # 2. 更新格式化字典名稱
         format_dict = {
-            "大戶%": "{:.2f}",
-            "大戶週增減": "{:+.2f}",
-            "人數變動": "{:+.2f}",
-            "集中度(大+中)": "{:.2f}"
+            "大戶 (%)": "{:.2f}",
+            "大戶週增減 (%)": "{:+.2f}",
+            "人數變動 (人)": "{:+.2f}",
+            "集中度 (大+中) (%)": "{:.2f}"
         }
         
-        st.dataframe(df_rank[["股號", "名稱", "大戶%", "大戶週增減", "人數變動", "集中度(大+中)"]].style.format(format_dict).map(
+        st.dataframe(df_rank[["股號", "名稱", "大戶 (%)", "大戶週增減 (%)", "人數變動 (人)", "集中度 (大+中) (%)"]].style.format(format_dict).map(
             lambda x: "color: red" if isinstance(x, (int, float)) and x > 0 else "color: green" if isinstance(x, (int, float)) and x < 0 else "", 
-            subset=["大戶週增減", "人數變動"]), use_container_width=True, height=500)
+            subset=["大戶週增減 (%)", "人數變動 (人)"]), use_container_width=True, height=500)
     else:
-        all_files = glob.glob("data/chip/**/*.parquet", recursive=True)
-        if not all_files:
-            st.error("❌ 尚未偵測到資料庫。")
-        else:
-            st.info("⌛ 排行榜檔案生成中，請稍後刷新。")
+        st.info("⌛ 排行榜檔案生成中，請稍後刷新。")
 
 # ═══════════════════════════════════════════════════════════════
-# Tab 2：個股深度分析 (指標 100% 還原)
+# Tab 2：個股深度分析 (底部新增說明文件)
 # ═══════════════════════════════════════════════════════════════
 with tab2:
     st.header(f"📈 {sid} {sname} 戰情看板")
@@ -112,25 +116,18 @@ with tab2:
     start_dt, end_dt = pd.to_datetime(d_range[0]), pd.to_datetime(d_range[1])
     raw_chip = load_stock_data(str(path))
     df_chip = raw_chip[(raw_chip["資料日期"] >= start_dt) & (raw_chip["資料日期"] <= end_dt)]
-    
-    if df_chip.empty:
-        st.warning(f"💡 此日期區間內無資料，請嘗試放寬側邊欄的『選擇區間』。")
-        st.stop()
-
+    if df_chip.empty: st.stop()
     df_price = get_price_data(sid, start_dt, end_dt)
 
     weekly_rows = []
     for d, sub in df_chip.groupby("資料日期"):
         pm = df_price[df_price.index <= d]
         p_close, p_vol = (float(pm.iloc[-1]["Close"]), float(pm.iloc[-1]["Volume"] / 1000)) if not pm.empty else (0.0, 0.0)
-        
         def _agg(lvs):
             m = sub["持股分級"].isin(lvs)
             return float(sub.loc[m, "權重"].sum()), float(sub.loc[m, "人數"].sum()), float(sub.loc[m, "股數"].sum())
-        
         bw, bp, bs = _agg(big_lv); mw, mp, ms = _agg(mid_lv); sw, sp, ss = _agg(small_lv)
         tp, ts = float(sub["人數"].sum()), float(sub["股數"].sum())
-        
         weekly_rows.append({
             "日期": d, "股價": round(p_close, 2), "成交張數": int(p_vol),
             "大戶%": round(bw, 2), "中間戶%": round(mw, 2), "散戶%": round(sw, 2),
@@ -148,7 +145,6 @@ with tab2:
         return "⚪ 中性觀望"
     res["診斷"] = res.apply(_diag_row, axis=1)
 
-    # 圖表：彩色成交量與禁用縮放 (維持優化)
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.5, 0.15, 0.35], specs=[[{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]])
     fig.add_trace(go.Bar(x=res["日期"], y=res["總人數"], name="總人數", marker_color="royalblue", opacity=0.8, width=432000000), row=3, col=1)
     fig.add_trace(go.Scatter(x=res["日期"], y=res["大戶%"], name="大戶%", line=dict(color="red", width=3)), row=1, col=1, secondary_y=True)
@@ -196,3 +192,23 @@ with tab2:
             st.write(f"最新一期診斷：**{res['診斷'].iloc[-1]}**")
     else:
         st.info("💡 區間報告需至少兩週資料。")
+
+    # ═══════════════════════════════════════════════════════════════
+    # 底部說明備註 (新增區塊)
+    # ═══════════════════════════════════════════════════════════════
+    st.divider()
+    with st.expander("ℹ️ 祥哥模型指標定義說明"):
+        st.markdown("""
+        ### 🔍 指標定義說明
+        *   **持續性分析 (區間集中慣性)**: 統計該區間內，共有幾週符合「大戶持股增加」且「股東人數減少」的情況。
+            *   *意義*: 週數比例越高，代表籌碼正穩定地由散戶流向大戶，屬於高品質的收集趨勢。
+        *   **大戶/股價相關性**: 計算大戶持股比例與收盤價的相關係數。
+            *   *意義*: 若接近 1，代表股價漲跌高度受大戶動向支配；若為負值，代表大戶正在逢高出貨或逢低承接。
+        
+        ### ⚖️ 綜合判斷標準
+        *   **🔴 強力吸籌**: 大戶持股比例增加，且總人數顯著下降。代表主力大舉進場且散戶恐慌/退場，籌碼高度集中。
+        *   **🟡 主力加碼**: 大戶持股比例單週呈增加趨勢。
+        *   **🟠 主力減碼**: 大戶持股比例單週呈減少趨勢。
+        *   **⚪ 中性觀望**: 籌碼變動不明顯，或大戶與人數同向變動，多空尚在博弈。
+        *   **⚠️ 籌碼渙散**: 大戶持股比例大幅下降且總人數增加。代表主力撤出，籌碼流向散戶，需注意回檔風險。
+        """)
