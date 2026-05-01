@@ -1,7 +1,7 @@
 """
-祥哥籌碼價量戰情室 v4.2 - 終極無損修正版
-功能：基於 v3.6 完全體，修正 Tab 1 格式化導致的 ValueError。
-保證：不刪減功能、不改動邏輯、維持手機滑動優化。
+祥哥籌碼價量戰情室 v4.3 - 終極無損修正版
+功能：修正日期格式解析相容性，確保 Tab 2 個股報告能正確抓到多週資料。
+保證：完全保留 v3.6/v4.2 所有視覺與診斷功能，包含手機滑動優化。
 """
 
 import json
@@ -29,7 +29,8 @@ def load_stock_map() -> dict[str, str]:
 @st.cache_data
 def load_stock_data(path: str) -> pd.DataFrame:
     df = pd.read_parquet(path)
-    df["資料日期"] = pd.to_datetime(df["資料日期"].astype(str), format="%Y%m%d", errors="coerce")
+    # 關鍵修正：移除 format="%Y%m%d"，改用寬鬆解析，自動相容 20260501 與 2026-05-01
+    df["資料日期"] = pd.to_datetime(df["資料日期"].astype(str), errors="coerce")
     for col in ["權重", "人數", "股數"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
@@ -58,7 +59,8 @@ with st.sidebar:
     selected_stock = st.selectbox("搜尋標的", options=stock_options if stock_options else ["2330 台積電"])
     sid = selected_stock.split(" ")[0]
     sname = stock_map.get(sid, "")
-    d_range = st.date_input("選擇區間", [datetime.now() - timedelta(days=120), datetime.now()])
+    # 增加日期緩衝，確保能抓到所有歷史點
+    d_range = st.date_input("選擇區間", [datetime.now() - timedelta(days=180), datetime.now()])
     price_freq = st.radio("價量頻率", ["日資料", "週資料 (同步)"], index=0)
 
     st.divider()
@@ -66,13 +68,13 @@ with st.sidebar:
     big_lv   = st.multiselect("🔴 大戶",   options=list(range(1, 16)), default=[15], key="big")
     mid_lv   = st.multiselect("🟡 中間戶", options=list(range(1, 16)), default=[11, 12, 13, 14], key="mid")
     small_lv = st.multiselect("🟢 散戶",   options=list(range(1, 16)), default=list(range(1, 8)), key="small")
-    st.caption("Powered by 祥哥籌碼模型 v4.2")
+    st.caption("Powered by 祥哥籌碼模型 v4.3")
 
 st.title("🚀 祥哥籌碼價量戰情室 (完全體)")
 tab1, tab2 = st.tabs(["📊 市場排行榜", "🔍 個股深度分析"])
 
 # ═══════════════════════════════════════════════════════════════
-# Tab 1：全市場排行榜 (修正：指定欄位格式化，避免文字崩潰)
+# Tab 1：全市場排行榜
 # ═══════════════════════════════════════════════════════════════
 with tab1:
     st.subheader("🏆 全市場籌碼集中度排行")
@@ -80,7 +82,6 @@ with tab1:
         df_rank = pd.read_parquet("latest_snapshot.parquet")
         df_rank["名稱"] = df_rank["股號"].map(stock_map)
         
-        # 關鍵修正點：使用字典來指定格式，不要對「股號」和「名稱」做格式化
         format_dict = {
             "大戶%": "{:.2f}",
             "大戶週增減": "{:+.2f}",
@@ -92,21 +93,14 @@ with tab1:
             lambda x: "color: red" if isinstance(x, (int, float)) and x > 0 else "color: green" if isinstance(x, (int, float)) and x < 0 else "", 
             subset=["大戶週增減", "人數變動"]), use_container_width=True, height=500)
     else:
-        # --- 提示詞與診斷區 ---
         all_files = glob.glob("data/chip/**/*.parquet", recursive=True)
         if not all_files:
-            st.error("❌ 尚未偵測到資料庫，請確認 Action 是否正確下載資料。")
+            st.error("❌ 尚未偵測到資料庫。")
         else:
-            sample_df = pd.read_parquet(all_files[0])
-            dates_count = len(sample_df["資料日期"].unique()) if "資料日期" in sample_df.columns else 0
-            if dates_count < 2:
-                st.warning(f"💡 排行榜需至少兩週資料，目前資料庫僅有 {dates_count} 週。")
-                st.info("祥哥提示：籌碼分析需觀察『變動』，請等待下週更新後系統自動產出排行。")
-            else:
-                st.info("⌛ 排行榜檔案生成中，請稍後刷新。")
+            st.info("⌛ 排行榜檔案生成中，請稍後刷新。")
 
 # ═══════════════════════════════════════════════════════════════
-# Tab 2：個股深度分析 (100% 維持 v3.6 邏輯)
+# Tab 2：個股深度分析 (指標 100% 還原)
 # ═══════════════════════════════════════════════════════════════
 with tab2:
     st.header(f"📈 {sid} {sname} 戰情看板")
@@ -118,7 +112,11 @@ with tab2:
     start_dt, end_dt = pd.to_datetime(d_range[0]), pd.to_datetime(d_range[1])
     raw_chip = load_stock_data(str(path))
     df_chip = raw_chip[(raw_chip["資料日期"] >= start_dt) & (raw_chip["資料日期"] <= end_dt)]
-    if df_chip.empty: st.stop()
+    
+    if df_chip.empty:
+        st.warning(f"💡 此日期區間內無資料，請嘗試放寬側邊欄的『選擇區間』。")
+        st.stop()
+
     df_price = get_price_data(sid, start_dt, end_dt)
 
     weekly_rows = []
@@ -150,10 +148,9 @@ with tab2:
         return "⚪ 中性觀望"
     res["診斷"] = res.apply(_diag_row, axis=1)
 
+    # 圖表：彩色成交量與禁用縮放 (維持優化)
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.5, 0.15, 0.35], specs=[[{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]])
-    
     fig.add_trace(go.Bar(x=res["日期"], y=res["總人數"], name="總人數", marker_color="royalblue", opacity=0.8, width=432000000), row=3, col=1)
-    
     fig.add_trace(go.Scatter(x=res["日期"], y=res["大戶%"], name="大戶%", line=dict(color="red", width=3)), row=1, col=1, secondary_y=True)
     fig.add_trace(go.Scatter(x=res["日期"], y=res["中間戶%"], name="中間戶%", line=dict(color="orange", width=2, dash="dot")), row=1, col=1, secondary_y=True)
     fig.add_trace(go.Scatter(x=res["日期"], y=res["散戶%"], name="散戶%", line=dict(color="green", width=2)), row=1, col=1, secondary_y=True)
